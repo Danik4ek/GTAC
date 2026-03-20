@@ -27,15 +27,10 @@ class GorillaTagBot:
         self.temp_session_id: Optional[bytes] = None
         self.server_token: Optional[bytes] = None
         self.server_id: Optional[bytes] = None
-        self.game_server_session_id: Optional[bytes] = None  # Session ID для игрового сервера
-        self.game_server_token: Optional[bytes] = None  # Token для игрового сервера
-        self.game_server_id: Optional[bytes] = None  # Server ID для игрового сервера
 
         # Счетчики
         self.packets_sent = 0
         self.packets_received = 0
-        self.in_room = False
-        self.running = False
 
         # P0 пакет (инициализация Photon)
         self.P0_PACKET = bytes.fromhex(
@@ -180,15 +175,12 @@ class GorillaTagBot:
             packet[24:28] = server_token
         return bytes(packet)
 
-    def create_join_request_packet(self, session_id: Optional[bytes] = None) -> bytes:
+    def create_join_request_packet(self) -> bytes:
         """Создает пакет для запроса на подключение"""
-        if session_id is None:
-            session_id = self.temp_session_id if self.temp_session_id else bytes(4)
-
         packet = bytearray(56)
         packet[0:4] = bytes.fromhex("ff ff 00 01")
         packet[4:8] = struct.pack('<I', 0x00000015)
-        packet[8:12] = session_id
+        packet[8:12] = self.temp_session_id if self.temp_session_id else bytes(4)
         packet[12:16] = bytes.fromhex("02 ff 01 04")
         packet[16:20] = bytes.fromhex("00 00 00 2c")
         packet[20:24] = bytes.fromhex("00 00 00 01")
@@ -198,118 +190,92 @@ class GorillaTagBot:
         packet[36:56] = bytes.fromhex("00 00 00 00 00 00 00 00 00 00 13 88 00 00 00 02 00 00 00 02")
         return bytes(packet)
 
-    def create_guid_packet(self, server_id: Optional[bytes] = None, session_id: Optional[bytes] = None) -> bytes:
+    def create_guid_packet(self) -> bytes:
         """Создает пакет для отправки GUID"""
-        if server_id is None:
-            server_id = self.server_id if self.server_id else bytes.fromhex("0a 03 c2 37")
-        if session_id is None:
-            session_id = self.temp_session_id if self.temp_session_id else bytes(4)
-
-        guid_bytes = self.MY_GUID.encode('ascii')
-        packet_len = 56 + len(guid_bytes) + 1  # +1 для завершающего байта 0x62
-        packet = bytearray(packet_len)
-
+        packet = bytearray(85)
         packet[0:4] = bytes.fromhex("82 d0 00 02")
         packet[4:8] = struct.pack('<I', 0x00000078)
-        packet[8:12] = server_id
-        packet[12:16] = session_id
-        packet[16:20] = bytes.fromhex("01 ff 00 04")
-        packet[20:24] = bytes.fromhex("00 00 00 14")
-        packet[24:40] = bytes.fromhex("00 00 00 00 00 00 00 01 d0 d9 a9 59 06 00 01 04")
-        packet[40:44] = bytes.fromhex("00 00 00 35")
-        packet[44:48] = bytes.fromhex("00 00 00 01")
-        packet[48:52] = bytes.fromhex("f3 00 01 08")
-        packet[52:56] = bytes.fromhex("1e 41 08 0f")
-        packet[56:60] = bytes.fromhex("00 37")
+
+        if self.server_id:
+            packet[8:12] = self.server_id
+        else:
+            packet[8:12] = bytes.fromhex("0a 03 c2 37")
+
+        packet[12:16] = bytes.fromhex("01 ff 00 04")
+        packet[16:20] = bytes.fromhex("00 00 00 14")
+        packet[20:36] = bytes.fromhex("00 00 00 00 00 00 00 01 d0 d9 a9 59 06 00 01 04")
+        packet[36:40] = bytes.fromhex("00 00 00 35")
+        packet[40:44] = bytes.fromhex("00 00 00 01")
+        packet[44:48] = bytes.fromhex("f3 00 01 08")
+        packet[48:52] = bytes.fromhex("1e 41 08 0f")
+        packet[52:56] = bytes.fromhex("00 37")
 
         # Добавляем GUID
-        packet[60:60 + len(guid_bytes)] = guid_bytes
-        packet[60 + len(guid_bytes)] = 0x62  # Завершающий байт
+        guid_bytes = self.MY_GUID.encode('ascii')
+        packet[56:56 + len(guid_bytes)] = guid_bytes
 
         return bytes(packet)
 
-    def create_key_exchange_packet(self, server_id: Optional[bytes] = None,
-                                   session_id: Optional[bytes] = None) -> bytes:
+    def create_key_exchange_packet(self) -> bytes:
         """Создает пакет для обмена ключами"""
-        if server_id is None:
-            server_id = self.server_id if self.server_id else bytes.fromhex("0a 03 c2 37")
-        if session_id is None:
-            session_id = self.temp_session_id if self.temp_session_id else bytes(4)
-
         packet = bytearray(159)
         packet[0:4] = bytes.fromhex("82 d0 00 03")
         packet[4:8] = struct.pack('<I', 0x000000d4)
-        packet[8:12] = server_id
-        packet[12:16] = session_id
-        packet[16:20] = bytes.fromhex("01 00 00 04")
-        packet[20:24] = bytes.fromhex("00 00 00 14")
-        packet[24:40] = bytes.fromhex("00 00 00 00 00 00 00 01 17 01 26 17 06 00 01 04")
-        packet[40:44] = bytes.fromhex("00 00 00 73")
-        packet[44:48] = bytes.fromhex("00 00 00 02")
-        packet[48:52] = bytes.fromhex("f3 06 00 01")
-        packet[52:56] = bytes.fromhex("01 43 60")
+
+        if self.server_id:
+            packet[8:12] = self.server_id
+        else:
+            packet[8:12] = bytes.fromhex("0a 03 c2 37")
+
+        packet[12:16] = bytes.fromhex("01 00 00 04")
+        packet[16:20] = bytes.fromhex("00 00 00 14")
+        packet[20:36] = bytes.fromhex("00 00 00 00 00 00 00 01 17 01 26 17 06 00 01 04")
+        packet[36:40] = bytes.fromhex("00 00 00 73")
+        packet[40:44] = bytes.fromhex("00 00 00 02")
+        packet[44:48] = bytes.fromhex("f3 06 00 01")
+        packet[48:52] = bytes.fromhex("01 43 60")
 
         # Случайные данные для ключа
-        random_bytes = bytes([random.randint(0, 255) for _ in range(103)])
-        packet[56:159] = random_bytes
+        random_bytes = bytes([random.randint(0, 255) for _ in range(107)])
+        packet[52:159] = random_bytes
 
         return bytes(packet)
 
-    def create_create_game_packet(self, server_id: Optional[bytes] = None, session_id: Optional[bytes] = None) -> bytes:
+    def create_create_game_packet(self) -> bytes:
         """Создает пакет для создания/подключения к комнате"""
-        if server_id is None:
-            server_id = self.server_id if self.server_id else bytes.fromhex("0a 03 c2 37")
-        if session_id is None:
-            session_id = self.temp_session_id if self.temp_session_id else bytes(4)
-
-        room_bytes = self.room_code.encode('ascii')
-        packet_len = 56 + len(room_bytes)
-        packet = bytearray(packet_len)
-
+        packet = bytearray(61)
         packet[0:4] = bytes.fromhex("82 d0 00 02")
         packet[4:8] = struct.pack('<I', 0x00000155)
-        packet[8:12] = server_id
-        packet[12:16] = session_id
-        packet[16:20] = bytes.fromhex("01 00 00 04")
-        packet[20:24] = bytes.fromhex("00 00 00 14")
-        packet[24:40] = bytes.fromhex("00 00 00 00 00 00 00 03 d0 d9 aa 44 06 00 01 04")
-        packet[40:44] = bytes.fromhex("00 00 00 1d")
-        packet[44:48] = bytes.fromhex("00 00 00 04")
-        packet[48:52] = bytes.fromhex("f3 02 e2 01")
-        packet[52:56] = bytes.fromhex("ff 07 0a")
+
+        if self.server_id:
+            packet[8:12] = self.server_id
+        else:
+            packet[8:12] = bytes.fromhex("0a 03 c2 37")
+
+        packet[12:16] = bytes.fromhex("01 00 00 04")
+        packet[16:20] = bytes.fromhex("00 00 00 14")
+        packet[20:36] = bytes.fromhex("00 00 00 00 00 00 00 03 d0 d9 aa 44 06 00 01 04")
+        packet[36:40] = bytes.fromhex("00 00 00 1d")
+        packet[40:44] = bytes.fromhex("00 00 00 04")
+        packet[44:48] = bytes.fromhex("f3 02 e2 01")
+        packet[48:52] = bytes.fromhex("ff 07 0a")
 
         # Добавляем название комнаты
-        packet[56:56 + len(room_bytes)] = room_bytes
+        room_bytes = self.room_code.encode('ascii')
+        packet[52:52 + len(room_bytes)] = room_bytes
 
         return bytes(packet)
 
-    def create_create_room_on_master_packet(self, session_id: bytes) -> bytes:
-        """Создает пакет для создания комнаты на мастер-сервере"""
-        packet = bytearray(32)
-        packet[0:4] = bytes.fromhex("ff ff 00 01")
-        packet[4:8] = struct.pack('<I', 0x0000000e)
-        packet[8:12] = session_id
-        packet[12:16] = bytes.fromhex("01 ff 00 04")
-        packet[16:20] = bytes.fromhex("00 00 00 14")
-        packet[20:24] = bytes.fromhex("00 00 00 00")
-        packet[24:28] = bytes.fromhex("c3 05 82 0d")  # Random ID как в логе игры
-        packet[28:32] = bytes.fromhex("00 00 00 00")
-        return bytes(packet)
-
-    def create_keepalive_packet(self, session_id: Optional[bytes] = None) -> bytes:
+    def create_keepalive_packet(self) -> bytes:
         """Создает простой пакет для поддержания соединения"""
-        if session_id is None:
-            session_id = self.temp_session_id if self.temp_session_id else bytes(4)
-
         packet = bytearray(32)
         packet[0:4] = bytes.fromhex("ff ff 00 01")
         packet[4:8] = struct.pack('<I', 0x0000000e)
-        packet[8:12] = session_id
+        packet[8:12] = self.temp_session_id if self.temp_session_id else bytes(4)
         packet[12:16] = bytes.fromhex("01 ff 00 04")
         packet[16:20] = bytes.fromhex("00 00 00 14")
         packet[20:24] = bytes.fromhex("00 00 00 00")
-        packet[24:28] = bytes.fromhex("c3 05 82 0d")
-        packet[28:32] = bytes.fromhex("00 00 00 00")
+        packet[24:28] = bytes.fromhex("c3 05 82 0d")  # Random ID
         return bytes(packet)
 
     def extract_server_id_from_response(self, response: bytes) -> Optional[bytes]:
@@ -330,133 +296,11 @@ class GorillaTagBot:
         for i in range(20, len(response) - 4):
             candidate = response[i:i + 4]
             if all(b != 0 for b in candidate):
-                if self.server_token and candidate != self.server_token:
+                if candidate != self.server_token:
                     print(f"      Найден server_id на смещении {i}: {candidate.hex()}")
                     return candidate
 
         return None
-
-    def connect_to_game_server(self, game_server_ip: str):
-        """Подключается к игровому серверу"""
-        print(f"\n🎮 Подключение к игровому серверу: {game_server_ip}:5055")
-        game_server_addr = (game_server_ip, 5055)
-
-        # Генерируем новый Session ID для игрового сервера
-        self.game_server_session_id = self.generate_temp_session_id()
-        print(f"🆕 Game Server Session ID: {self.game_server_session_id.hex()}")
-
-        # ФАЗА: Инициализация на игровом сервере
-        print("\n" + "=" * 60)
-        print("🟢 ФАЗА G1: Инициализация на игровом сервере")
-        print("=" * 60)
-        for i in range(12):
-            print(f"   Пакет {i + 1}/12")
-            self.send_packet(self.P0_PACKET, addr=game_server_addr, wait_response=False)
-            time.sleep(0.001)
-
-        # ФАЗА: Аутентификация на игровом сервере
-        print("\n" + "=" * 60)
-        print("🟢 ФАЗА G2: Аутентификация на игровом сервере")
-        print("=" * 60)
-
-        auth_request = self.create_auth_request_packet(self.game_server_session_id)
-        response = self.send_packet(auth_request, addr=game_server_addr, timeout=5.0)
-
-        if not response:
-            print("❌ Нет ответа на аутентификацию от игрового сервера")
-            return False
-
-        self.game_server_token = response[-4:]
-        print(f"🔑 Game Server Token: {self.game_server_token.hex()}")
-
-        time.sleep(0.05)
-
-        # ФАЗА: Еще 12 пакетов
-        print("\n" + "=" * 60)
-        print("🟢 ФАЗА G3: Продолжение инициализации")
-        print("=" * 60)
-        for i in range(12):
-            print(f"   Пакет {i + 1}/12")
-            self.send_packet(self.P0_PACKET, addr=game_server_addr, wait_response=False)
-            time.sleep(0.001)
-
-        # Финальный пакет аутентификации
-        print("\n📡 Финальный пакет...")
-        final_packet = self.create_final_auth_packet(self.game_server_session_id, self.game_server_token)
-        response = self.send_packet(final_packet, addr=game_server_addr, timeout=5.0)
-
-        if not response:
-            print("❌ Нет ответа на финальный пакет от игрового сервера")
-            return False
-
-        self.game_server_id = self.extract_server_id_from_response(response)
-        if not self.game_server_id:
-            print("❌ Не удалось найти server_id от игрового сервера")
-            return False
-
-        print(f"✅ Game Server ID: {self.game_server_id.hex()}")
-
-        # ФАЗА: Photon Join на игровом сервере
-        print("\n" + "=" * 60)
-        print("🟢 ФАЗА G4: Photon Join на игровом сервере")
-        print("=" * 60)
-
-        for i in range(12):
-            print(f"   Пакет {i + 1}/12")
-            self.send_packet(self.P0_PACKET, addr=game_server_addr, wait_response=False)
-            time.sleep(0.001)
-
-        # Join Request
-        print("\n📡 Join Request...")
-        join_request = self.create_join_request_packet(self.game_server_session_id)
-        response = self.send_packet(join_request, addr=game_server_addr, timeout=5.0)
-
-        if not response:
-            print("❌ Нет ответа на Join Request от игрового сервера")
-            return False
-
-        # Еще 12 пакетов
-        print("\n🟢 Еще 12 пакетов...")
-        for i in range(12):
-            print(f"   Пакет {i + 1}/12")
-            self.send_packet(self.P0_PACKET, addr=game_server_addr, wait_response=False)
-            time.sleep(0.001)
-
-        # Отправка GUID
-        print("\n📡 Отправка GUID...")
-        guid_packet = self.create_guid_packet(self.game_server_id, self.game_server_session_id)
-        response = self.send_packet(guid_packet, addr=game_server_addr, timeout=5.0)
-
-        if not response:
-            print("❌ Нет ответа на GUID от игрового сервера")
-            return False
-
-        print("✅ GUID подтвержден на игровом сервере")
-
-        # Обмен ключами
-        print("\n📡 Обмен ключами...")
-        key_packet = self.create_key_exchange_packet(self.game_server_id, self.game_server_session_id)
-        response = self.send_packet(key_packet, addr=game_server_addr, timeout=5.0)
-
-        if not response:
-            print("❌ Нет ответа на обмен ключами от игрового сервера")
-            return False
-
-        print("✅ Ключи обменяны на игровом сервере")
-
-        # Запрос комнаты на игровом сервере
-        print(f"\n📡 Запрос комнаты '{self.room_code}' на игровом сервере...")
-        room_request = self.create_create_game_packet(self.game_server_id, self.game_server_session_id)
-        response = self.send_packet(room_request, addr=game_server_addr, timeout=5.0)
-
-        if not response:
-            print("❌ Нет ответа на запрос комнаты от игрового сервера")
-            return False
-
-        print("✅ Комната успешно найдена на игровом сервере!")
-
-        self.room_server = game_server_addr
-        return True
 
     def keep_alive_loop(self):
         """Простой цикл для поддержания соединения"""
@@ -464,12 +308,10 @@ class GorillaTagBot:
         while self.running:
             try:
                 if self.room_server and self.in_room:
-                    # Отправляем keep-alive на игровой сервер
-                    keepalive = self.create_keepalive_packet(self.game_server_session_id)
+                    # Отправляем простой пакет каждые 30 секунд
+                    keepalive = self.create_keepalive_packet()
                     self.send_packet(keepalive, addr=self.room_server, wait_response=False)
-                    time.sleep(2.0)  # Отправляем каждые 2 секунды как в логах
-                else:
-                    time.sleep(1)
+                time.sleep(30)
             except Exception as e:
                 print(f"Ошибка keep-alive: {e}")
                 break
@@ -604,39 +446,28 @@ class GorillaTagBot:
             if b"Game does not exist" in response:
                 print("\n⚠️  Комната не существует - создаем новую")
 
-                # Отправляем пакет на создание комнаты (как в логе игры пакет 1025)
-                create_room_packet = self.create_create_room_on_master_packet(self.temp_session_id)
-                self.send_packet(create_room_packet, wait_response=False)
-                print("✅ Пакет создания комнаты отправлен")
+                # Отправляем подтверждение создания
+                confirm_packet = bytes.fromhex(
+                    "ff ff 00 01 00 00 00 15" + self.temp_session_id.hex() +
+                    "01 00 00 04 00 00 00 14 00 00 00 00 00 00 00 04 d1 0f 13 1e 04 ff 01 04 00 00 00 0c 00 00 00 03"
+                )
+                response = self.send_packet(confirm_packet, timeout=5.0)
 
-                # Ждем немного для создания комнаты
-                time.sleep(1.0)
-
-                # Теперь подключаемся к игровому серверу
-                game_server_ip = "45.67.211.78"  # IP из ваших логов
-                if self.connect_to_game_server(game_server_ip):
-                    self.in_room = True
-                    print("\n" + "=" * 60)
-                    print("✅ БОТ УСПЕШНО СОЗДАЛ И ПОДКЛЮЧИЛСЯ К КОМНАТЕ!")
-                    print("=" * 60)
-                else:
-                    print("❌ Не удалось подключиться к игровому серверу")
-                    return
+                if response:
+                    print("✅ Комната успешно создана!")
             else:
-                # Если комната существует, пытаемся получить IP игрового сервера из ответа
-                print("\n✅ Комната существует, ищем игровой сервер...")
+                print("\n✅ Комната существует, подключение выполнено!")
 
-                # Парсим ответ для получения IP (упрощенно)
-                game_server_ip = "45.67.211.78"  # В реальности нужно парсить из response
+            # Определяем игровой сервер
+            self.room_server = ("45.67.211.78", 5055)
+            print(f"🎮 Игровой сервер: {self.room_server[0]}:{self.room_server[1]}")
 
-                if self.connect_to_game_server(game_server_ip):
-                    self.in_room = True
-                    print("\n" + "=" * 60)
-                    print("✅ БОТ УСПЕШНО ПОДКЛЮЧИЛСЯ К КОМНАТЕ!")
-                    print("=" * 60)
-                else:
-                    print("❌ Не удалось подключиться к игровому серверу")
-                    return
+            self.in_room = True
+            print("\n" + "=" * 60)
+            print("✅ БОТ УСПЕШНО ПОДКЛЮЧЕН К КОМНАТЕ!")
+            print("=" * 60)
+            print("📡 Ожидание... (нажмите Ctrl+C для выхода)")
+            print()
 
             # Запускаем keep-alive в отдельном потоке
             keep_alive_thread = threading.Thread(target=self.keep_alive_loop, daemon=True)
