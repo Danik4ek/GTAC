@@ -27,10 +27,14 @@ class GorillaTagBot:
         self.temp_session_id: Optional[bytes] = None
         self.server_token: Optional[bytes] = None
         self.server_id: Optional[bytes] = None
+        self.game_session_id: Optional[bytes] = None  # Session ID для игрового сервера
+        self.game_server_id: Optional[bytes] = None  # Server ID для игрового сервера
 
         # Счетчики
         self.packets_sent = 0
         self.packets_received = 0
+        self.in_room = False
+        self.running = False
 
         # P0 пакет (инициализация Photon)
         self.P0_PACKET = bytes.fromhex(
@@ -176,41 +180,55 @@ class GorillaTagBot:
         return bytes(packet)
 
     def create_join_request_packet(self) -> bytes:
-        """Создает пакет для запроса на подключение"""
-        packet = bytearray(56)
+        packet = bytearray(32)
         packet[0:4] = bytes.fromhex("ff ff 00 01")
-        packet[4:8] = struct.pack('<I', 0x00000015)
+        packet[4:8] = struct.pack('<I', 0x00000060)  # Длина 96
         packet[8:12] = self.temp_session_id if self.temp_session_id else bytes(4)
-        packet[12:16] = bytes.fromhex("02 ff 01 04")
-        packet[16:20] = bytes.fromhex("00 00 00 2c")
-        packet[20:24] = bytes.fromhex("00 00 00 01")
-        packet[24:28] = bytes.fromhex("00 00 04 b0")
-        packet[28:32] = bytes.fromhex("00 00 80 00")
-        packet[32:36] = bytes.fromhex("00 00 00 02")
-        packet[36:56] = bytes.fromhex("00 00 00 00 00 00 00 00 00 00 13 88 00 00 00 02 00 00 00 02")
+        packet[12:16] = bytes.fromhex("01 ff 00 04")
+        packet[16:20] = bytes.fromhex("00 00 00 14")
+        packet[20:24] = bytes.fromhex("00 00 00 00")
+
+        # ✅ Последние 8 байт - вероятно, тоже из ответа сервера
+        if self.server_token:
+            packet[24:28] = self.server_token  # Используем токен от сервера
+            packet[28:32] = bytes.fromhex("00 00 00 00")
+        else:
+            packet[24:32] = bytes.fromhex("da 1c 52 d4 00 00 00 00")
+
         return bytes(packet)
 
     def create_guid_packet(self) -> bytes:
-        """Создает пакет для отправки GUID"""
         packet = bytearray(85)
         packet[0:4] = bytes.fromhex("82 d0 00 02")
-        packet[4:8] = struct.pack('<I', 0x00000078)
 
-        if self.server_id:
-            packet[8:12] = self.server_id
-        else:
-            packet[8:12] = bytes.fromhex("0a 03 c2 37")
+        # ✅ Длина пакета - должна соответствовать реальной
+        packet[4:8] = struct.pack('<I', 0x0000005c)  # 92 байта
+
+        # ✅ Server ID - получаем от сервера
+        packet[8:12] = self.server_id if self.server_id else bytes(4)
 
         packet[12:16] = bytes.fromhex("01 ff 00 04")
         packet[16:20] = bytes.fromhex("00 00 00 14")
-        packet[20:36] = bytes.fromhex("00 00 00 00 00 00 00 01 d0 d9 a9 59 06 00 01 04")
+
+        # ✅ ЭТО ВАЖНО! Эти 16 байт должны быть из ответа сервера!
+        # В реальном пакете: 00 00 00 00 00 00 00 01 d1 9c ac 33 06 00 01 04
+        #                  ^^^^^^^^^^^^^^^^^^^ ^^^^^^^^^^^
+        #                  статичная часть     динамический ID
+        if self.game_session_id:
+            packet[20:24] = bytes.fromhex("00 00 00 00")
+            packet[24:28] = bytes.fromhex("00 00 00 01")
+            packet[28:32] = self.game_session_id  # ← Используем session_id от сервера!
+            packet[32:36] = bytes.fromhex("06 00 01 04")
+        else:
+            packet[20:36] = bytes.fromhex("00 00 00 00 00 00 00 01 d1 9c ac 33 06 00 01 04")
+
         packet[36:40] = bytes.fromhex("00 00 00 35")
         packet[40:44] = bytes.fromhex("00 00 00 01")
         packet[44:48] = bytes.fromhex("f3 00 01 08")
         packet[48:52] = bytes.fromhex("1e 41 08 0f")
         packet[52:56] = bytes.fromhex("00 37")
 
-        # Добавляем GUID
+        # GUID - статичный ✅
         guid_bytes = self.MY_GUID.encode('ascii')
         packet[56:56 + len(guid_bytes)] = guid_bytes
 
@@ -267,15 +285,33 @@ class GorillaTagBot:
         return bytes(packet)
 
     def create_keepalive_packet(self) -> bytes:
-        """Создает простой пакет для поддержания соединения"""
+        """Создает keep-alive пакет для игрового сервера"""
         packet = bytearray(32)
+
+        # Заголовок
         packet[0:4] = bytes.fromhex("ff ff 00 01")
+
+        # Длина (статическая 14)
         packet[4:8] = struct.pack('<I', 0x0000000e)
-        packet[8:12] = self.temp_session_id if self.temp_session_id else bytes(4)
+
+        # Session ID (game_session_id)
+        packet[8:12] = self.game_session_id if self.game_session_id else bytes(4)
+
+        # Флаги
         packet[12:16] = bytes.fromhex("01 ff 00 04")
+
+        # Длина данных (20)
         packet[16:20] = bytes.fromhex("00 00 00 14")
+
+        # Нули
         packet[20:24] = bytes.fromhex("00 00 00 00")
-        packet[24:28] = bytes.fromhex("c3 05 82 0d")  # Random ID
+
+        # ✅ ВАЖНО: используем game_server_id, а не счетчик!
+        packet[24:28] = self.game_server_id if self.game_server_id else bytes(4)
+
+        # Нули в конце
+        packet[28:32] = bytes.fromhex("00 00 00 00")
+
         return bytes(packet)
 
     def extract_server_id_from_response(self, response: bytes) -> Optional[bytes]:
@@ -283,22 +319,190 @@ class GorillaTagBot:
         if len(response) < 30:
             return None
 
-        # Ищем паттерн: после 01 ff 00 00 00 00 00 14 00 00
-        marker = bytes.fromhex("01 ff 00 00 00 00 00 14 00 00")
-        pos = response.find(marker)
-        if pos != -1 and pos + len(marker) + 4 <= len(response):
-            potential_id = response[pos + len(marker):pos + len(marker) + 4]
-            if potential_id != b'\x00\x00\x00\x00':
-                print(f"      Найден server_id: {potential_id.hex()}")
-                return potential_id
+        # В ответе server_id находится на смещении 24-27
+        # Это 4 байта после "00 00 00 01" (которое на смещении 20-23)
+        if len(response) >= 28:
+            # Проверяем паттерн: байты 20-23 должны быть 00 00 00 01
+            if response[20:24] == bytes.fromhex("00 00 00 01"):
+                server_id = response[24:28]
+                if server_id != b'\x00\x00\x00\x00':
+                    print(f"      Найден server_id на смещении 24: {server_id.hex()}")
+                    return server_id
 
-        # Альтернативный поиск
-        for i in range(20, len(response) - 4):
-            candidate = response[i:i + 4]
-            if all(b != 0 for b in candidate):
-                if candidate != self.server_token:
-                    print(f"      Найден server_id на смещении {i}: {candidate.hex()}")
-                    return candidate
+        # Альтернативный поиск: ищем "00 00 00 01" и берем следующие 4 байта
+        marker = bytes.fromhex("00 00 00 01")
+        pos = response.find(marker)
+        if pos != -1 and pos + 8 <= len(response):
+            server_id = response[pos + 4:pos + 8]
+            if server_id != b'\x00\x00\x00\x00':
+                print(f"      Найден server_id на смещении {pos + 4}: {server_id.hex()}")
+                return server_id
+
+        return None
+
+    # В create_keepalive_packet используем этот ID:
+    def create_keepalive_packet(self) -> bytes:
+        packet = bytearray(32)
+        packet[0:4] = bytes.fromhex("ff ff 00 01")
+        packet[4:8] = struct.pack('<I', 0x0000000e)
+        packet[8:12] = self.game_session_id  # session_id
+        packet[12:16] = bytes.fromhex("01 ff 00 04")
+        packet[16:20] = bytes.fromhex("00 00 00 14")
+        packet[20:24] = bytes.fromhex("00 00 00 00")
+        # Используем server_id, полученный от сервера!
+        packet[24:28] = self.keepalive_server_id if hasattr(self, 'keepalive_server_id') else bytes.fromhex(
+            "c3 05 82 0d")
+        packet[28:32] = bytes.fromhex("00 00 00 00")
+        return bytes(packet)
+
+    def extract_game_token(self, response: bytes) -> Optional[bytes]:
+        """Извлекает Game Token из ответа сервера"""
+        if len(response) < 20:
+            return None
+
+        # Для ответа от игрового сервера (24 байта)
+        # Game Token находится в последних 4 байтах
+        if len(response) == 24:
+            # Проверяем, что это ответ от игрового сервера
+            if response[0:4] == bytes.fromhex("00 00 00 01"):
+                token = response[20:24]
+                if token != b'\x00\x00\x00\x00':
+                    print(f"      Найден Game Token на смещении 20: {token.hex()}")
+                    return token
+
+        # Для ответа от мастер-сервера (56 байт)
+        # Ищем паттерн "00 00 00 02" и берем следующие 4 байта
+        marker = bytes.fromhex("00 00 00 02")
+        pos = response.find(marker)
+        if pos != -1 and pos + 8 <= len(response):
+            token = response[pos + 4:pos + 8]
+            if token != b'\x00\x00\x00\x00':
+                print(f"      Найден Game Token на смещении {pos + 4}: {token.hex()}")
+                return token
+
+        return None
+
+    def connect_to_game_server(self, game_ip: str):
+        """Подключается к игровому серверу"""
+        print(f"\n🎮 Подключаемся к игровому серверу: {game_ip}:5055")
+        game_addr = (game_ip, 5055)
+
+        # Генерируем НОВЫЙ session_id для игрового сервера
+        self.game_session_id = self.generate_temp_session_id()
+        print(f"  Game Session ID: {self.game_session_id.hex()}")
+
+        # ========== ФАЗА 0: 12 init пакетов ==========
+        for i in range(12):
+            self.send_packet(self.P0_PACKET, addr=game_addr, wait_response=False)
+            time.sleep(0.001)
+
+        # ========== ФАЗА 1: Аутентификация ==========
+        auth = self.create_auth_request_packet(self.game_session_id)
+        response = self.send_packet(auth, addr=game_addr, timeout=5.0)
+        if not response:
+            return False
+
+        # Отладочный вывод
+        print(f"  Response from game server: {response.hex()}")
+        print(f"  Response length: {len(response)}")
+
+        # Правильно извлекаем Game Token
+        game_token = self.extract_game_token(response)
+        if not game_token:
+            print(f"  ❌ Не удалось извлечь Game Token из ответа")
+            # Показываем возможные кандидаты
+            for i in range(len(response) - 4):
+                candidate = response[i:i + 4]
+                if candidate != b'\x00\x00\x00\x00' and candidate != self.game_session_id:
+                    print(f"    Candidate at {i}: {candidate.hex()}")
+            return False
+        print(f"  Game Token: {game_token.hex()}")
+
+        # ========== ФАЗА 2: Еще 12 init ==========
+        for i in range(12):
+            self.send_packet(self.P0_PACKET, addr=game_addr, wait_response=False)
+            time.sleep(0.001)
+
+        # ========== ФАЗА 3: Финальная аутентификация ==========
+        final = self.create_final_auth_packet(self.game_session_id, game_token)
+        response = self.send_packet(final, addr=game_addr, timeout=5.0)
+        if not response:
+            return False
+
+        self.game_server_id = self.extract_game_server_id(response)
+        if not self.game_server_id:
+            print("  ❌ Не удалось получить Game Server ID")
+            return False
+        print(f"  Game Server ID: {self.game_server_id.hex()}")
+
+        # ========== ФАЗА 4: Join ==========
+        for i in range(12):
+            self.send_packet(self.P0_PACKET, addr=game_addr, wait_response=False)
+            time.sleep(0.001)
+
+        join = self.create_join_request_packet()
+        join = join[:8] + self.game_session_id + join[12:]
+        response = self.send_packet(join, addr=game_addr, timeout=5.0)
+        if not response:
+            return False
+
+        # ========== ФАЗА 5: Еще 12 init ==========
+        for i in range(12):
+            self.send_packet(self.P0_PACKET, addr=game_addr, wait_response=False)
+            time.sleep(0.001)
+
+        # ========== ФАЗА 6: Отправка GUID ==========
+        guid_packet = self.create_guid_packet()
+        guid_packet = guid_packet[:8] + self.game_server_id + guid_packet[12:16] + self.game_session_id + guid_packet[
+            20:]
+        response = self.send_packet(guid_packet, addr=game_addr, timeout=5.0)
+        if not response:
+            return False
+        print("  ✅ GUID подтвержден")
+
+        # ========== ФАЗА 7: Обмен ключами ==========
+        key_packet = self.create_key_exchange_packet()
+        key_packet = key_packet[:8] + self.game_server_id + key_packet[12:16] + self.game_session_id + key_packet[20:]
+        response = self.send_packet(key_packet, addr=game_addr, timeout=5.0)
+        if not response:
+            return False
+        print("  ✅ Ключи обменяны")
+
+        # ========== ФАЗА 8: Запрос комнаты ==========
+        room_request = self.create_create_game_packet()
+        room_request = room_request[:8] + self.game_server_id + room_request[
+            12:16] + self.game_session_id + room_request[20:]
+        response = self.send_packet(room_request, addr=game_addr, timeout=5.0)
+        if not response:
+            return False
+
+        # ✅ ИЗВЛЕКАЕМ keep-alive server_id ИЗ ЭТОГО ЖЕ ОТВЕТА
+        keepalive_server_id = self.extract_server_id_from_response(response)
+        if keepalive_server_id:
+            self.keepalive_server_id = keepalive_server_id
+            print(f"  Keep-alive Server ID: {keepalive_server_id.hex()}")
+        else:
+            # Если не нашли, используем game_server_id как fallback
+            self.keepalive_server_id = self.game_server_id
+            print(f"  Keep-alive Server ID (fallback): {self.keepalive_server_id.hex()}")
+
+        print("  ✅ Подключение к комнате успешно!")
+        self.room_server = game_addr
+        return True
+
+    def extract_game_server_id(self, response: bytes) -> Optional[bytes]:
+        """Извлекает server_id игрового сервера из ответа"""
+        if len(response) < 30:
+            return None
+
+        # В ответе от игрового сервера server_id находится на смещении 24-27
+        if len(response) >= 28:
+            # Проверяем паттерн: байты 20-23 должны быть 00 00 00 01
+            if response[20:24] == bytes.fromhex("00 00 00 01"):
+                server_id = response[24:28]
+                if server_id != b'\x00\x00\x00\x00':
+                    print(f"      Найден game_server_id на смещении 24: {server_id.hex()}")
+                    return server_id
 
         return None
 
@@ -308,10 +512,12 @@ class GorillaTagBot:
         while self.running:
             try:
                 if self.room_server and self.in_room:
-                    # Отправляем простой пакет каждые 30 секунд
+                    # Используем game_session_id, а не temp_session_id!
                     keepalive = self.create_keepalive_packet()
+                    # Подменяем session_id на game_session_id
+                    keepalive = keepalive[:8] + self.game_session_id + keepalive[12:]
                     self.send_packet(keepalive, addr=self.room_server, wait_response=False)
-                time.sleep(30)
+                time.sleep(2)
             except Exception as e:
                 print(f"Ошибка keep-alive: {e}")
                 break
@@ -375,6 +581,26 @@ class GorillaTagBot:
 
             if not response:
                 print("❌ Нет ответа на финальный пакет")
+                return
+
+            # Отладочный вывод
+            print(f"  Response hex: {response.hex()}")
+            print(f"  Response length: {len(response)}")
+
+            self.server_id = self.extract_server_id_from_response(response)
+            if not self.server_id:
+                print("❌ Не удалось найти server_id")
+                return
+
+            print(f"✅ Server ID: {self.server_id.hex()}")
+
+            self.server_id = self.extract_server_id_from_response(response)
+            if not self.server_id:
+                print("❌ Не удалось найти server_id")
+                # Попробуем извлечь другими способами
+                for i in range(20, min(50, len(response) - 4)):
+                    candidate = response[i:i + 4]
+                    print(f"    Candidate at {i}: {candidate.hex()}")
                 return
 
             self.server_id = self.extract_server_id_from_response(response)
@@ -446,34 +672,36 @@ class GorillaTagBot:
             if b"Game does not exist" in response:
                 print("\n⚠️  Комната не существует - создаем новую")
 
-                # Отправляем подтверждение создания
-                confirm_packet = bytes.fromhex(
-                    "ff ff 00 01 00 00 00 15" + self.temp_session_id.hex() +
-                    "01 00 00 04 00 00 00 14 00 00 00 00 00 00 00 04 d1 0f 13 1e 04 ff 01 04 00 00 00 0c 00 00 00 03"
-                )
-                response = self.send_packet(confirm_packet, timeout=5.0)
+                # Отправляем пакет создания комнаты
+                create_packet = self.create_keepalive_packet()
+                create_packet = create_packet[:24] + bytes.fromhex("c3 05 82 0d 00 00 00 00")
+                self.send_packet(create_packet, wait_response=False)
+                print("✅ Комната создается...")
+                time.sleep(1)
 
-                if response:
-                    print("✅ Комната успешно создана!")
+                # Подключаемся к игровому серверу
+                if self.connect_to_game_server("45.67.211.78"):
+                    self.in_room = True
+                    print("\n✅ БОТ ПОДКЛЮЧЕН К КОМНАТЕ!")
+                else:
+                    print("❌ Не удалось подключиться")
+                    return
             else:
-                print("\n✅ Комната существует, подключение выполнено!")
+                print("\n✅ Комната существует, подключаемся...")
+                if self.connect_to_game_server("45.67.211.78"):
+                    self.in_room = True
+                    print("\n✅ БОТ ПОДКЛЮЧЕН К КОМНАТЕ!")
+                else:
+                    print("❌ Не удалось подключиться")
+                    return
 
-            # Определяем игровой сервер
-            self.room_server = ("45.67.211.78", 5055)
-            print(f"🎮 Игровой сервер: {self.room_server[0]}:{self.room_server[1]}")
-
-            self.in_room = True
-            print("\n" + "=" * 60)
-            print("✅ БОТ УСПЕШНО ПОДКЛЮЧЕН К КОМНАТЕ!")
-            print("=" * 60)
             print("📡 Ожидание... (нажмите Ctrl+C для выхода)")
-            print()
 
-            # Запускаем keep-alive в отдельном потоке
+            # Запускаем keep-alive
             keep_alive_thread = threading.Thread(target=self.keep_alive_loop, daemon=True)
             keep_alive_thread.start()
 
-            # Просто ждем, ничего не делаем
+            # Ждем
             while self.running:
                 time.sleep(1)
 
